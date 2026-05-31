@@ -1,0 +1,36 @@
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+wandb/
+# records metadata for some runs
+launch**
+
+.DS_store
+.DS_Store
+.nfs*
+output
+
+# Local tool state (Claude Code, Codex, env vars)
+.claude/skills/
+.codex
+.env
+
+# Experiment outputs and results
+analysis/
+samples/
+results/
+outputs/
+pretrained_models/
+finetuned_ckpt/
+checkpoints/
+
+# Data and cached models
+data/
+tmp/
+
+# SLURM logs
+logs/
+logs_old/
+*.out
+*.err
+slurm-*.out
