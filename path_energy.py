@@ -1,5 +1,11 @@
 import torch, torch.nn.functional as F
 
+from model_guidance import (
+    apply_model_guidance_correction,
+    prepare_model_guidance_batch,
+    validate_model_guidance_config,
+)
+
 
 class VAEDecoderAdapter:
     """
@@ -725,8 +731,57 @@ def generalized_mixed_path_derivative_fd(
     return gamma_t, gamma_dot_t
 
 
-def teacher_track_energy(teacher, gamma_t, gamma_dot_t, y, t):
-    teacher_velocity = teacher(gamma_t, t, y)
+def teacher_track_energy(
+    teacher,
+    gamma_t,
+    gamma_dot_t,
+    y,
+    t,
+    *,
+    mg_active=False,
+    mg_w_lo=1.45,
+    mg_w_hi=1.45,
+    mg_drop_frac=0.1,
+    mg_data_side_threshold=0.75,
+    num_classes=1000,
+):
+    if not mg_active:
+        teacher_velocity = teacher(gamma_t, t, y)
+        return (gamma_dot_t - teacher_velocity).flatten(1).pow(2).mean(dim=1)
+
+    validate_model_guidance_config(
+        weight_low=mg_w_lo,
+        weight_high=mg_w_hi,
+        drop_fraction=mg_drop_frac,
+        data_side_threshold=mg_data_side_threshold,
+    )
+    y_mg, weights, num_guided = prepare_model_guidance_batch(
+        y,
+        num_classes=num_classes,
+        weight_low=mg_w_lo,
+        weight_high=mg_w_hi,
+        drop_fraction=mg_drop_frac,
+        guidance_active=True,
+        dtype=gamma_t.dtype,
+    )
+    teacher_velocity = teacher(gamma_t, t, y_mg)
+    if num_guided > 0:
+        conditional_prediction = teacher_velocity[:num_guided].detach()
+        with torch.no_grad():
+            uncond_y = torch.full_like(y[:num_guided], num_classes)
+            reference_prediction = teacher(
+                gamma_t[:num_guided],
+                t[:num_guided],
+                uncond_y,
+            )
+        teacher_velocity = apply_model_guidance_correction(
+            teacher_velocity,
+            conditional_prediction,
+            reference_prediction,
+            t,
+            weights,
+            data_side_threshold=mg_data_side_threshold,
+        )
     return (gamma_dot_t - teacher_velocity).flatten(1).pow(2).mean(dim=1)
 
 
@@ -797,6 +852,12 @@ def combined_path_energy(
     feature_energy_scale=1.0,
     feature_global_scale=1.0,
     x0_hat=None,
+    mg_active=False,
+    mg_w_lo=1.45,
+    mg_w_hi=1.45,
+    mg_drop_frac=0.1,
+    mg_data_side_threshold=0.75,
+    num_classes=1000,
 ):
     if loss_mode not in {"track_mixed_euclid_learned", "feature_energy"}:
         raise ValueError(f"Unsupported loss_mode: {loss_mode}")
@@ -855,15 +916,34 @@ def combined_path_energy(
             feature_global_scale=feature_global_scale,
         )
         return _metric_dict(total, zero, euclid, feature_energy, zero, gamma_t, gamma_dot_t, gamma_ddot_t)
+    if mg_active:
+        num_drop = round(mg_drop_frac * len(y))
+        y_for_path = y.clone()
+        if num_drop > 0:
+            y_for_path[len(y) - num_drop:] = num_classes
+    else:
+        y_for_path = y
     gamma_learned_t, gamma_learned_dot_t, gamma_learned_ddot_t = generalized_path_geometry_fd(
-        path_model, teacher, x0, x1, y, t, h, path_parameterization=path_parameterization, path_subtractor=path_subtractor, subtractor_residual_scale=subtractor_residual_scale, x0_hat=x0_hat,
+        path_model, teacher, x0, x1, y_for_path, t, h, path_parameterization=path_parameterization, path_subtractor=path_subtractor, subtractor_residual_scale=subtractor_residual_scale, x0_hat=x0_hat,
     )
     gamma_lin_t = linear_path(x0, x1, t)
     gamma_lin_dot_t = x1 - x0
     gamma_t = (1.0 - learned_mix) * gamma_lin_t + learned_mix * gamma_learned_t
     gamma_dot_t = (1.0 - learned_mix) * gamma_lin_dot_t + learned_mix * gamma_learned_dot_t
     gamma_ddot_t = learned_mix * gamma_learned_ddot_t
-    track = teacher_track_energy(teacher, gamma_t, gamma_dot_t, y, t)
+    track = teacher_track_energy(
+        teacher,
+        gamma_t,
+        gamma_dot_t,
+        y,
+        t,
+        mg_active=mg_active,
+        mg_w_lo=mg_w_lo,
+        mg_w_hi=mg_w_hi,
+        mg_drop_frac=mg_drop_frac,
+        mg_data_side_threshold=mg_data_side_threshold,
+        num_classes=num_classes,
+    )
     euclid = euclidean_energy(gamma_learned_dot_t)
     feature_energy = torch.zeros_like(euclid)
     accel = acceleration_energy(gamma_learned_ddot_t)

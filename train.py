@@ -30,6 +30,12 @@ from models import (
     build_dual_stem_path_sit,
     is_dual_stem_path_state_dict,
 )
+from model_guidance import (
+    apply_model_guidance_correction,
+    model_guidance_reference_labels,
+    prepare_model_guidance_batch,
+    validate_model_guidance_config,
+)
 from sit_utils.train_utils import (
     get_optimizer_lr, make_lr_schedule, maybe_autocast, parse_transport_args, set_optimizer_lr,
 )
@@ -41,6 +47,7 @@ from path_energy import (
 )
 from sit_utils.latent_dataset import LATENT_SCALE, PackedVAELabelDataset, PairedPackedLatentSampler, is_packed_vae_latent_dir, paired_packed_latent_original_count, resolve_packed_latent_view_mode, sample_packed_vae_latents
 from transport import create_transport, Sampler
+from transport.utils import mean_flat
 from diffusers.models import AutoencoderKL
 from sit_utils import wandb_utils
 
@@ -276,7 +283,7 @@ def unwrap_path_checkpoint_for_weights(obj):
 
 
 def infer_learn_sigma_from_state_dict(state_dict, model_name):
-    patch_size = int(model_name.split("/")[-1])
+    patch_size = int(model_name.split("/")[-1].split("-")[0])
     out_dim = state_dict["final_layer.linear.weight"].shape[0]
     no_sigma_dim = (patch_size ** 2) * 4
     sigma_dim = (patch_size ** 2) * 8
@@ -532,7 +539,21 @@ def main(args):
         input_size=latent_size,
         num_classes=args.num_classes,
         attn_func=args.attn_func,
+        class_dropout_prob=args.class_dropout_prob,
+        learn_sigma=args.learn_sigma,
+        always_allocate_uncond_slot=(args.mg_start_step >= 0),
     )
+
+    if args.mg_start_step >= 0:
+        if args.class_dropout_prob != 0.0:
+            logger.warning(
+                "MG is enabled with random class dropout. The reference MG recipe uses "
+                "--class-dropout-prob 0.0 to avoid compounding dropout mechanisms."
+            )
+        if args.learn_sigma:
+            logger.warning(
+                "MG is enabled with learned sigma. The reference MG recipe uses --no-learn-sigma."
+            )
 
     # Note that parameter initialization is done within the SiT constructor
     ema_models = OrderedDict()
@@ -857,7 +878,6 @@ def main(args):
                             x = sample_packed_vae_latents(x)
                         else:
                             x = vae.encode(x).latent_dist.sample().mul_(LATENT_SCALE)
-                model_kwargs = dict(y=y)
                 sync_context = (
                     model.no_sync()
                     if args.grad_accum_steps > 1 and accum_idx < args.grad_accum_steps - 1
@@ -865,7 +885,50 @@ def main(args):
                 )
                 with sync_context:
                     with maybe_autocast("cuda", args.amp_dtype):
+                        mg_configured = args.mg_start_step >= 0
+                        mg_active = mg_configured and train_steps >= args.mg_start_step
+                        if mg_configured:
+                            y_for_model, mg_weights, num_guided = prepare_model_guidance_batch(
+                                y,
+                                num_classes=args.num_classes,
+                                weight_low=args.mgw[0],
+                                weight_high=args.mgw[1],
+                                drop_fraction=args.mg_data_ratio[1],
+                                guidance_active=mg_active,
+                                dtype=torch.float32,
+                            )
+                        else:
+                            y_for_model, mg_weights, num_guided = y, None, 0
+                        model_kwargs = dict(y=y_for_model)
                         loss_dict = transport.training_losses(model, x, model_kwargs, plan_fn=training_plan)
+                        if mg_active and num_guided > 0:
+                            with torch.no_grad():
+                                reference_y = model_guidance_reference_labels(
+                                    y[:num_guided],
+                                    num_classes=args.num_classes,
+                                    contrastive=args.mg_contrastive,
+                                )
+                                conditional_prediction = ema(
+                                    loss_dict["xt"][:num_guided],
+                                    loss_dict["t"][:num_guided],
+                                    y[:num_guided],
+                                )
+                                reference_prediction = ema(
+                                    loss_dict["xt"][:num_guided],
+                                    loss_dict["t"][:num_guided],
+                                    reference_y,
+                                )
+                                augmented_target = apply_model_guidance_correction(
+                                    loss_dict["ut"],
+                                    conditional_prediction,
+                                    reference_prediction,
+                                    loss_dict["t"],
+                                    mg_weights,
+                                    data_side_threshold=args.mg_data_side_threshold,
+                                )
+                            loss_dict["loss"] = mean_flat(
+                                (loss_dict["model_output"] - augmented_target) ** 2
+                            )
                         loss = loss_dict["loss"].mean()
                     scaled_loss = scaler.scale(loss / args.grad_accum_steps) if scaler.is_enabled() else (loss / args.grad_accum_steps)
                     scaled_loss.backward()
@@ -1118,6 +1181,52 @@ if __name__ == "__main__":
                         choices=["base", "fa2", "fa3", "torch_sdpa"],
                         help="Attention backend. Default: timm built-in.")
 
+    parser.add_argument(
+        "--class-dropout-prob",
+        type=float,
+        default=0.1,
+        help="Random CFG label-dropout probability. MG reference runs use 0.0.",
+    )
+    parser.add_argument(
+        "--learn-sigma",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Keep the existing learned-sigma head by default; MG reference runs use --no-learn-sigma.",
+    )
+    parser.add_argument(
+        "--mg-start-step",
+        type=int,
+        default=-1,
+        help="Step at which MG target augmentation activates. -1 preserves legacy training exactly.",
+    )
+    parser.add_argument(
+        "--mg-data-ratio",
+        type=float,
+        nargs=2,
+        default=[0.2, 0.1],
+        metavar=("MG_FRAC", "DROP_FRAC"),
+        help="MG compatibility tuple. MG_FRAC is reserved; DROP_FRAC is the unconditional fraction.",
+    )
+    parser.add_argument(
+        "--mgw",
+        type=float,
+        nargs=2,
+        default=[1.45, 1.45],
+        metavar=("LOW", "HIGH"),
+        help="Uniform range for the MG guidance weight.",
+    )
+    parser.add_argument(
+        "--mg-data-side-threshold",
+        type=float,
+        default=0.75,
+        help="Apply MG where t > 1 - threshold under this repository's t=1=data convention.",
+    )
+    parser.add_argument(
+        "--mg-contrastive",
+        action="store_true",
+        help="Use a random non-target class instead of the unconditional slot for the reference prediction.",
+    )
+
     parse_transport_args(parser)
     args = parser.parse_args()
     if args.grad_accum_steps < 1:
@@ -1136,4 +1245,15 @@ if __name__ == "__main__":
         raise ValueError("--learned-path-subtractor-residual-scale must be positive.")
     if not np.isfinite(args.ema_decay) or args.ema_decay < 0.0 or args.ema_decay > 1.0:
         raise ValueError("--ema-decay must be in [0, 1].")
+    if not 0.0 <= args.class_dropout_prob <= 1.0:
+        raise ValueError("--class-dropout-prob must be in [0, 1].")
+    if args.mg_start_step < -1:
+        raise ValueError("--mg-start-step must be -1 or non-negative.")
+    if args.mg_start_step >= 0:
+        validate_model_guidance_config(
+            weight_low=args.mgw[0],
+            weight_high=args.mgw[1],
+            drop_fraction=args.mg_data_ratio[1],
+            data_side_threshold=args.mg_data_side_threshold,
+        )
     main(args)

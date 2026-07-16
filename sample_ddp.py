@@ -37,7 +37,7 @@ def unwrap_checkpoint(obj):
 
 
 def infer_learn_sigma_from_state_dict(state_dict, model_name):
-    patch_size = int(model_name.split("/")[-1])
+    patch_size = int(model_name.split("/")[-1].split("-")[0])
     out_dim = state_dict["final_layer.linear.weight"].shape[0]
     no_sigma_dim = (patch_size ** 2) * 4
     sigma_dim = (patch_size ** 2) * 8

@@ -37,6 +37,7 @@ from models import (
     is_dual_stem_path_state_dict,
     load_dual_stem_path_state_dict,
 )
+from model_guidance import validate_model_guidance_config
 from path_energy import (
     FeaturePhi,
     VAEDecoderAdapter,
@@ -185,7 +186,7 @@ def unwrap_checkpoint(obj):
 
 
 def infer_learn_sigma_from_state_dict(state_dict, model_name):
-    patch_size = int(model_name.split("/")[-1])
+    patch_size = int(model_name.split("/")[-1].split("-")[0])
     out_dim = state_dict["final_layer.linear.weight"].shape[0]
     no_sigma_dim = (patch_size ** 2) * 4
     sigma_dim = (patch_size ** 2) * 8
@@ -1271,6 +1272,7 @@ def main(args):
                     x0_hat_rho_scale=args.x0_hat_rho_scale,
                 )
 
+                mg_active = args.mg_start_step >= 0 and train_steps >= args.mg_start_step
                 path_metrics = combined_path_energy(
                     path_model,
                     teacher,
@@ -1291,6 +1293,12 @@ def main(args):
                     feature_energy_scale=args.feature_energy_scale,
                     feature_global_scale=args.feature_global_scale,
                     x0_hat=x0_hat_rep,
+                    mg_active=mg_active,
+                    mg_w_lo=args.mgw[0],
+                    mg_w_hi=args.mgw[1],
+                    mg_drop_frac=args.mg_data_ratio[1],
+                    mg_data_side_threshold=args.mg_data_side_threshold,
+                    num_classes=args.num_classes,
                 )
                 loss = path_metrics["total"].mean()
 
@@ -1607,6 +1615,34 @@ if __name__ == "__main__":
     parser.add_argument("--disable-path-residual-x0-time-rho", action="store_true",
                         help="Use rho=1 for residual x0_hat sampling instead of rho=clamp(1-t, 0, 1).")
     parser.add_argument("--x0-hat-rho-scale", type=float, default=1.0)
+    parser.add_argument(
+        "--mg-start-step",
+        type=int,
+        default=-1,
+        help="Optimizer step at which MG augments E_track. -1 keeps the legacy objective exactly.",
+    )
+    parser.add_argument(
+        "--mg-data-ratio",
+        type=float,
+        nargs=2,
+        default=[0.2, 0.1],
+        metavar=("MG_FRAC", "DROP_FRAC"),
+        help="MG compatibility tuple. MG_FRAC is reserved; DROP_FRAC is the unconditional fraction.",
+    )
+    parser.add_argument(
+        "--mgw",
+        type=float,
+        nargs=2,
+        default=[1.45, 1.45],
+        metavar=("LOW", "HIGH"),
+        help="Uniform range for the MG guidance weight.",
+    )
+    parser.add_argument(
+        "--mg-data-side-threshold",
+        type=float,
+        default=0.75,
+        help="Apply MG where t > 1 - threshold under this repository's t=1=data convention.",
+    )
     parser.add_argument("--num-time-samples", type=int, default=1)
     parser.add_argument("--reset-opt-on-resume", action="store_true")
     parser.add_argument("--log-every", type=int, default=50)
@@ -1659,5 +1695,14 @@ if __name__ == "__main__":
         raise ValueError("--num-time-samples must be at least 1.")
     if args.eval_num_batches < 1:
         raise ValueError("--eval-num-batches must be at least 1.")
+    if args.mg_start_step < -1:
+        raise ValueError("--mg-start-step must be -1 or non-negative.")
+    if args.mg_start_step >= 0:
+        validate_model_guidance_config(
+            weight_low=args.mgw[0],
+            weight_high=args.mgw[1],
+            drop_fraction=args.mg_data_ratio[1],
+            data_side_threshold=args.mg_data_side_threshold,
+        )
 
     main(args)

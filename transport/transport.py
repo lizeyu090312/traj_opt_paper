@@ -142,6 +142,12 @@ class Transport:
 
         terms = {}
         terms['pred'] = model_output
+        # Expose existing intermediates for opt-in target augmentations such as
+        # Model Guidance. The standard loss below is unchanged.
+        terms['t'] = t
+        terms['xt'] = xt
+        terms['ut'] = ut
+        terms['model_output'] = model_output
         if self.model_type == ModelType.VELOCITY:
             terms['loss'] = mean_flat(((model_output - ut) ** 2))
         else: 

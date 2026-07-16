@@ -133,9 +133,9 @@ class LabelEmbedder(nn.Module):
     """
     Embeds class labels into vector representations. Also handles label dropout for classifier-free guidance.
     """
-    def __init__(self, num_classes, hidden_size, dropout_prob):
+    def __init__(self, num_classes, hidden_size, dropout_prob, always_allocate_uncond_slot=False):
         super().__init__()
-        use_cfg_embedding = dropout_prob > 0
+        use_cfg_embedding = dropout_prob > 0 or always_allocate_uncond_slot
         self.embedding_table = nn.Embedding(num_classes + use_cfg_embedding, hidden_size)
         self.num_classes = num_classes
         self.dropout_prob = dropout_prob
@@ -228,6 +228,7 @@ class SiT(nn.Module):
         num_classes=1000,
         learn_sigma=True,
         attn_func=None,
+        always_allocate_uncond_slot=False,
     ):
         super().__init__()
         self.learn_sigma = learn_sigma
@@ -238,7 +239,12 @@ class SiT(nn.Module):
 
         self.x_embedder = PatchEmbed(input_size, patch_size, in_channels, hidden_size, bias=True)
         self.t_embedder = TimestepEmbedder(hidden_size)
-        self.y_embedder = LabelEmbedder(num_classes, hidden_size, class_dropout_prob)
+        self.y_embedder = LabelEmbedder(
+            num_classes,
+            hidden_size,
+            class_dropout_prob,
+            always_allocate_uncond_slot=always_allocate_uncond_slot,
+        )
         num_patches = self.x_embedder.num_patches
         # Will use fixed sin-cos embedding:
         self.pos_embed = nn.Parameter(torch.zeros(1, num_patches, hidden_size), requires_grad=False)
@@ -337,6 +343,18 @@ class SiT(nn.Module):
         half_eps = uncond_eps + cfg_scale * (cond_eps - uncond_eps)
         eps = torch.cat([half_eps, half_eps], dim=0)
         return torch.cat([eps, rest], dim=1)
+
+
+class SiTMGAdapter(SiT):
+    """Adapt native MG checkpoints to this repository's time/sign convention.
+
+    Native MG uses alpha_t=1-t, sigma_t=t and predicts noise-data, while this
+    repository uses alpha_t=t, sigma_t=1-t and predicts data-noise. Therefore
+    v_ours(x, t) = -v_mg(x, 1-t). The state-dict layout is unchanged.
+    """
+
+    def forward(self, x, t, y):
+        return -super().forward(x, 1.0 - t, y)
 
 
 class EndpointConditionProjector(nn.Module):
@@ -510,6 +528,13 @@ class DualStemPathSiT(nn.Module):
         return torch.cat([eps, rest], dim=1)
 
 
+class DualStemPathSiTMG(DualStemPathSiT):
+    """Dual-stem path model using the native MG time/sign convention."""
+
+    def forward(self, x_lin, delta, t, y):
+        return -super().forward(x_lin, delta, 1.0 - t, y)
+
+
 def _rename_x_embedder_key_for_dual_stem(key):
     if key.startswith("x_embedder."):
         return "x_embedder_lin." + key[len("x_embedder.") :]
@@ -627,6 +652,10 @@ def get_1d_sincos_pos_embed_from_grid(embed_dim, pos):
 def SiT_XL_2(**kwargs):
     return SiT(depth=28, hidden_size=1152, patch_size=2, num_heads=16, **kwargs)
 
+
+def SiT_XL_2_MG(**kwargs):
+    return SiTMGAdapter(depth=28, hidden_size=1152, patch_size=2, num_heads=16, **kwargs)
+
 def SiT_XL_4(**kwargs):
     return SiT(depth=28, hidden_size=1152, patch_size=4, num_heads=16, **kwargs)
 
@@ -678,9 +707,14 @@ SIT_MODEL_CONFIGS = {
 
 
 def build_dual_stem_path_sit(model_name, **kwargs):
-    if model_name not in SIT_MODEL_CONFIGS:
+    model_cls = DualStemPathSiT
+    lookup_name = model_name
+    if model_name.endswith("-MG"):
+        model_cls = DualStemPathSiTMG
+        lookup_name = model_name[:-3]
+    if lookup_name not in SIT_MODEL_CONFIGS:
         raise KeyError(f"Unknown SiT model variant: {model_name}")
-    return DualStemPathSiT(**SIT_MODEL_CONFIGS[model_name], **kwargs)
+    return model_cls(**SIT_MODEL_CONFIGS[lookup_name], **kwargs)
 
 
 SiT_models = {
@@ -688,4 +722,5 @@ SiT_models = {
     'SiT-L/2':  SiT_L_2,   'SiT-L/4':  SiT_L_4,   'SiT-L/8':  SiT_L_8,
     'SiT-B/2':  SiT_B_2,   'SiT-B/4':  SiT_B_4,   'SiT-B/8':  SiT_B_8,
     'SiT-S/2':  SiT_S_2,   'SiT-S/4':  SiT_S_4,   'SiT-S/8':  SiT_S_8,
+    'SiT-XL/2-MG': SiT_XL_2_MG,
 }

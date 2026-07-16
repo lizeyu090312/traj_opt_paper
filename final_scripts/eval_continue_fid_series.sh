@@ -35,6 +35,13 @@ CFG_SCALE="${CFG_SCALE:-4.0}"
 NUM_SAMPLING_STEPS="${NUM_SAMPLING_STEPS:-100}"
 PER_PROC_BATCH_SIZE="${PER_PROC_BATCH_SIZE:-32}"
 BASELINE_FID="${BASELINE_FID:-}"
+MODE="${MODE:-ODE}"
+SAMPLING_METHOD="${SAMPLING_METHOD:-}"
+
+if [[ "$MODE" != "ODE" && "$MODE" != "SDE" ]]; then
+  echo "MODE must be ODE or SDE, got '$MODE'." >&2
+  exit 1
+fi
 
 mkdir -p "$OUT_ROOT"
 cd "$PROJECT_ROOT"
@@ -101,9 +108,14 @@ for CKPT in "${EMA_CKPTS[@]}"; do
   if [[ -n "$ATTN_FUNC" ]]; then
     sample_attn_args+=(--attn-func "$ATTN_FUNC")
   fi
-  "$ENV_PYTHON" -m torch.distributed.run --standalone --nproc_per_node="$NPROC_PER_NODE" sample_ddp.py ODE \
+  sample_method_args=()
+  if [[ -n "$SAMPLING_METHOD" ]]; then
+    sample_method_args+=(--sampling-method "$SAMPLING_METHOD")
+  fi
+  "$ENV_PYTHON" -m torch.distributed.run --standalone --nproc_per_node="$NPROC_PER_NODE" sample_ddp.py "$MODE" \
     --model "$MODEL" \
     "${sample_attn_args[@]}" \
+    "${sample_method_args[@]}" \
     --image-size "$IMAGE_SIZE" \
     --ckpt "$CKPT" \
     --vae ema \

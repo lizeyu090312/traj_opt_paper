@@ -104,9 +104,55 @@ FLOW_AUTOSAVE_EVERY="${FLOW_AUTOSAVE_EVERY:-200}"
 FLOW_RESUME_CKPT="${FLOW_RESUME_CKPT:-}"
 RESUME_FROM_CYCLE_DIR="${RESUME_FROM_CYCLE_DIR:-}"
 
+# Model Guidance is disabled by default. Setting MG_START_STEP >= 0 enables
+# the same MG knobs in both the path E_track objective and the flow target.
+MG_START_STEP="${MG_START_STEP:--1}"
+MG_DATA_RATIO_BASE="${MG_DATA_RATIO_BASE:-0.2}"
+MG_DROP_FRAC="${MG_DROP_FRAC:-0.1}"
+MG_W_LO="${MG_W_LO:-1.45}"
+MG_W_HI="${MG_W_HI:-1.45}"
+MG_DATA_SIDE_THRESHOLD="${MG_DATA_SIDE_THRESHOLD:-0.75}"
+MG_CLASS_DROPOUT_PROB="${MG_CLASS_DROPOUT_PROB:-0.0}"
+MG_LEARN_SIGMA="${MG_LEARN_SIGMA:-0}"
+MG_CONTRASTIVE="${MG_CONTRASTIVE:-0}"
+
 path_residual_x0_time_rho_args=()
 if [[ "${DISABLE_PATH_RESIDUAL_X0_TIME_RHO:-0}" == "1" ]]; then
   path_residual_x0_time_rho_args=(--disable-path-residual-x0-time-rho)
+fi
+
+mg_path_args=()
+mg_flow_args=()
+if [[ ! "$MG_START_STEP" =~ ^-?[0-9]+$ ]]; then
+  echo "MG_START_STEP must be an integer, got '$MG_START_STEP'." >&2
+  exit 1
+fi
+if (( MG_START_STEP >= 0 )); then
+  mg_common_args=(
+    --mg-start-step "$MG_START_STEP"
+    --mg-data-ratio "$MG_DATA_RATIO_BASE" "$MG_DROP_FRAC"
+    --mgw "$MG_W_LO" "$MG_W_HI"
+    --mg-data-side-threshold "$MG_DATA_SIDE_THRESHOLD"
+  )
+  mg_path_args=("${mg_common_args[@]}")
+  mg_flow_args=(
+    "${mg_common_args[@]}"
+    --class-dropout-prob "$MG_CLASS_DROPOUT_PROB"
+  )
+  if [[ "$MG_LEARN_SIGMA" == "1" ]]; then
+    mg_flow_args+=(--learn-sigma)
+  elif [[ "$MG_LEARN_SIGMA" == "0" ]]; then
+    mg_flow_args+=(--no-learn-sigma)
+  else
+    echo "MG_LEARN_SIGMA must be 0 or 1, got '$MG_LEARN_SIGMA'." >&2
+    exit 1
+  fi
+  if [[ "$MG_CONTRASTIVE" == "1" ]]; then
+    mg_flow_args+=(--mg-contrastive)
+  elif [[ "$MG_CONTRASTIVE" != "0" ]]; then
+    echo "MG_CONTRASTIVE must be 0 or 1, got '$MG_CONTRASTIVE'." >&2
+    exit 1
+  fi
 fi
 
 GPU_LOG_PIDS=()
@@ -202,6 +248,15 @@ echo "FLOW_AUTOSAVE_EVERY=$FLOW_AUTOSAVE_EVERY"
 echo "FLOW_LR=$FLOW_LR"
 echo "FLOW_EMA_DECAY=$FLOW_EMA_DECAY"
 echo "FLOW_RESUME_CKPT=${FLOW_RESUME_CKPT:-<none>}"
+echo "MG_START_STEP=$MG_START_STEP"
+if (( MG_START_STEP >= 0 )); then
+  echo "MG_W=[$MG_W_LO, $MG_W_HI]"
+  echo "MG_DROP_FRAC=$MG_DROP_FRAC"
+  echo "MG_DATA_SIDE_THRESHOLD=$MG_DATA_SIDE_THRESHOLD"
+  echo "MG_CLASS_DROPOUT_PROB=$MG_CLASS_DROPOUT_PROB"
+  echo "MG_LEARN_SIGMA=$MG_LEARN_SIGMA"
+  echo "MG_CONTRASTIVE=$MG_CONTRASTIVE"
+fi
 
 nvidia-smi
 start_gpu_log "$RUN_DIR/gpu_metrics.csv"
@@ -359,6 +414,7 @@ for cycle in $(seq "$start_cycle" "$NUM_CYCLES"); do
       --learned-path-mix "$PATH_LEARNED_PATH_MIX" \
       "${path_residual_x0_time_rho_args[@]}" \
       --x0-hat-rho-scale "$X0_HAT_RHO_SCALE" \
+      "${mg_path_args[@]}" \
       --lr "$PATH_LR" \
       --lr-schedule cosine \
       --min-lr "$PATH_MIN_LR" \
@@ -433,7 +489,8 @@ for cycle in $(seq "$start_cycle" "$NUM_CYCLES"); do
       --learned-path-mix "$FLOW_LEARNED_PATH_MIX" \
       "${path_residual_x0_time_rho_args[@]}" \
       --x0-hat-rho-scale "$X0_HAT_RHO_SCALE" \
-      --learned-path-subtractor-residual-scale "$FLOW_LEARNED_PATH_SUBTRACTOR_RESIDUAL_SCALE"
+      --learned-path-subtractor-residual-scale "$FLOW_LEARNED_PATH_SUBTRACTOR_RESIDUAL_SCALE" \
+      "${mg_flow_args[@]}"
     stop_last_gpu_log
 
     flow_experiment_dir="$(find_latest_experiment_dir "$flow_results_root")"
