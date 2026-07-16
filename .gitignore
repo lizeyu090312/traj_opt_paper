@@ -1,36 +1,78 @@
+# Python caches, test output, and local environments
 __pycache__/
-*.pyc
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+build/
+dist/
+*.egg-info/
+.venv/
+venv/
 .ipynb_checkpoints/
+
+# Experiment tracking and local launch metadata
 wandb/
-# records metadata for some runs
 launch**
 
-.DS_store
-.DS_Store
-.nfs*
-output
-
-# Local tool state (Claude Code, Codex, env vars)
+# Local tool state and environment files
 .claude/skills/
+.claude/worktrees/
+.claude/settings.local.json
 .codex
+.jcode/
 .env
+.env.*
+!.env.example
 
-# Experiment outputs and results
+# OS and editor metadata
+.DS_Store
+.DS_store
+._*
+.AppleDouble
+.LSOverride
+Thumbs.db
+.nfs*
+*~
+*.swp
+*.swo
+.vscode/
+.idea/
+
+# Experiment outputs, generated samples, and results
 analysis/
-samples/
-results/
+output/
 outputs/
+results*/
+samples/
+generated/
 pretrained_models/
 finetuned_ckpt/
 checkpoints/
 
-# Data and cached models
+# Model weights and training snapshots
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+
+# Datasets and downloaded caches
 data/
 tmp/
+.cache/
 
-# SLURM logs
+# SLURM and application logs
 logs/
 logs_old/
 *.out
 *.err
+*.log
 slurm-*.out
+
+# Crash dumps
+core
+core.*
