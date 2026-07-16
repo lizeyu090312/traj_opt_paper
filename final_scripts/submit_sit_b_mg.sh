@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-PROJECT_ROOT="${PROJECT_ROOT:-/path/to/traj_opt_paper}"
+PROJECT_ROOT="${PROJECT_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 LAUNCHER="$PROJECT_ROOT/final_scripts/traj_opt.sh"
 MG_CKPT="${MG_CKPT:-}"
 

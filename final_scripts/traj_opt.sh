@@ -1,8 +1,8 @@
 #!/bin/bash
 
 #SBATCH --job-name=h200
-#SBATCH --output=/path/to/traj_opt_paper/logs/%j.out
-#SBATCH --error=/path/to/traj_opt_paper/logs/%j.err
+#SBATCH --output=logs/%j.out
+#SBATCH --error=logs/%j.err
 #SBATCH --partition=h200
 #SBATCH --time=24:00:00
 #SBATCH --nodes=1
@@ -15,7 +15,7 @@
 
 set -e
 
-PROJECT_ROOT="/path/to/traj_opt_paper"
+PROJECT_ROOT="${PROJECT_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 cd $PROJECT_ROOT
 
 CONDA_ENV_NAME="${CONDA_ENV_NAME:-SiT}"
@@ -25,7 +25,7 @@ eval "$(conda shell.bash hook)"
 conda activate "$CONDA_ENV_NAME"
 
 ENV_PYTHON="${ENV_PYTHON:-$(command -v python)}"
-IMAGENET_TRAIN="$PROJECT_ROOT/data/vae-sd-ema-packed"
+IMAGENET_TRAIN="${IMAGENET_TRAIN:-$PROJECT_ROOT/data/vae-sd-ema-packed}"
 
 REF_DIR="${REF_DIR:-$PROJECT_ROOT/data/fid_ref/VIRTUAL_imagenet256_labeled.npz}"
 SIT_MODEL="${SIT_MODEL:-SiT-S/2}"
@@ -71,7 +71,7 @@ BASELINE_FID="${BASELINE_FID:-17.322351396265162}"
 PATH_BETA="${PATH_BETA:-0.9}"
 PATH_FD_STEP="${PATH_FD_STEP:-0.02}"
 PATH_ACCEL_REG_WEIGHT="${PATH_ACCEL_REG_WEIGHT:-0.0}"
-PATH_LOSS_MODE="${PATH_LOSS_MODE:-default}"
+PATH_LOSS_MODE="${PATH_LOSS_MODE:-track_mixed_euclid_learned}"
 PATH_LEARNED_PATH_MIX="${PATH_LEARNED_PATH_MIX:-1.0}"
 X0_HAT_RHO_SCALE="${X0_HAT_RHO_SCALE:-1}"
 PATH_LR="${PATH_LR:-3e-4}"
