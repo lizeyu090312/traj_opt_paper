@@ -80,14 +80,28 @@ def _expand_t_like_x(t, x):
     return t.view(-1, *([1] * (x.ndim - 1)))
 
 
-def sample_path_residual_x0_hat(x0, t, *, disable_path_residual_x0_time_rho=False, x0_hat_rho_scale=1.0):
-    if disable_path_residual_x0_time_rho:
+def sample_path_residual_x0_hat(
+    x0,
+    t,
+    *,
+    disable_path_residual_x0_time_rho=False,
+    path_rho_constant=None,
+    x0_hat_rho_scale=1.0,
+):
+    if path_rho_constant is not None:
+        if torch.is_tensor(t):
+            t = t.to(device=x0.device, dtype=x0.dtype)
+        else:
+            t = torch.tensor(t, device=x0.device, dtype=x0.dtype)
+        rho = torch.full_like(t, float(path_rho_constant))
+    elif disable_path_residual_x0_time_rho:
         return x0
-    if torch.is_tensor(t):
-        t = t.to(device=x0.device, dtype=x0.dtype)
     else:
-        t = torch.tensor(t, device=x0.device, dtype=x0.dtype)
-    rho = torch.clamp(x0_hat_rho_scale * (1.0 - t), 0.0, 1.0)
+        if torch.is_tensor(t):
+            t = t.to(device=x0.device, dtype=x0.dtype)
+        else:
+            t = torch.tensor(t, device=x0.device, dtype=x0.dtype)
+        rho = torch.clamp(float(x0_hat_rho_scale) * (1.0 - t), 0.0, 1.0)
     rho_view = _expand_t_like_x(rho, x0)
     noise_scale_sq = torch.clamp(1.0 - rho_view * rho_view, min=0.0)
     return rho_view * x0 + torch.sqrt(noise_scale_sq) * torch.randn_like(x0)

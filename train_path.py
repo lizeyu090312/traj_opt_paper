@@ -413,6 +413,7 @@ def compute_geometry_diagnostics(
     path_subtractor=None,
     subtractor_residual_scale=1.0,
     disable_path_residual_x0_time_rho=False,
+    path_rho_constant=None,
     x0_hat_rho_scale=1.0,
 ):
     batch_size = x0.shape[0]
@@ -423,6 +424,7 @@ def compute_geometry_diagnostics(
         x0_rep,
         t_rep,
         disable_path_residual_x0_time_rho=disable_path_residual_x0_time_rho,
+        path_rho_constant=path_rho_constant,
         x0_hat_rho_scale=x0_hat_rho_scale,
     )
     path_gamma = generalized_mixed_path(
@@ -452,6 +454,7 @@ def compute_geometry_diagnostics(
         x0_rep,
         t_rep,
         disable_path_residual_x0_time_rho=disable_path_residual_x0_time_rho,
+        path_rho_constant=path_rho_constant,
         x0_hat_rho_scale=x0_hat_rho_scale,
     )
     _, path_gamma_dot = generalized_mixed_path_derivative_fd(
@@ -546,6 +549,7 @@ def run_zero_step_sanity_check(path_model, teacher, path_subtractor, vae, featur
             x0_rep,
             t_rep,
             disable_path_residual_x0_time_rho=args.disable_path_residual_x0_time_rho,
+            path_rho_constant=args.path_rho_constant,
             x0_hat_rho_scale=args.x0_hat_rho_scale,
         )
         path_metrics = combined_path_energy(
@@ -644,6 +648,7 @@ def evaluate(path_model, teacher, path_subtractor, vae, feature_decoder, feature
                     x0_rep,
                     t_rep,
                     disable_path_residual_x0_time_rho=args.disable_path_residual_x0_time_rho,
+                    path_rho_constant=args.path_rho_constant,
                     x0_hat_rho_scale=args.x0_hat_rho_scale,
                 )
 
@@ -701,6 +706,7 @@ def evaluate(path_model, teacher, path_subtractor, vae, feature_decoder, feature
                         path_parameterization=args.path_arch,
                         path_subtractor=path_subtractor,
                         disable_path_residual_x0_time_rho=args.disable_path_residual_x0_time_rho,
+                        path_rho_constant=args.path_rho_constant,
                         x0_hat_rho_scale=args.x0_hat_rho_scale,
                     )
                 diagnostic_sums = {key: 0.0 for key in batch_diagnostics}
@@ -1269,6 +1275,7 @@ def main(args):
                     x0_rep,
                     t_rep,
                     disable_path_residual_x0_time_rho=args.disable_path_residual_x0_time_rho,
+                    path_rho_constant=args.path_rho_constant,
                     x0_hat_rho_scale=args.x0_hat_rho_scale,
                 )
 
@@ -1614,7 +1621,10 @@ if __name__ == "__main__":
     parser.add_argument("--learned-path-mix", type=float, default=1.0)
     parser.add_argument("--disable-path-residual-x0-time-rho", action="store_true",
                         help="Use rho=1 for residual x0_hat sampling instead of rho=clamp(1-t, 0, 1).")
-    parser.add_argument("--x0-hat-rho-scale", type=float, default=1.0)
+    parser.add_argument("--path-rho-constant", type=float, default=None,
+                        help="Use a constant rho in [0,1] instead of the time-dependent schedule.")
+    parser.add_argument("--x0-hat-rho-scale", type=float, default=1.0,
+                        help="Scale in rho(t)=clamp(scale*(1-t),0,1) when constant rho is unset.")
     parser.add_argument(
         "--mg-start-step",
         type=int,
@@ -1687,6 +1697,15 @@ if __name__ == "__main__":
         raise ValueError("--fd-step must lie in (0, 1/3) when --accel-reg-weight is enabled.")
     if args.learned_path_mix < 0.0 or args.learned_path_mix > 1.0:
         raise ValueError("--learned-path-mix must be in [0, 1].")
+    if args.path_rho_constant is not None:
+        if not 0.0 <= args.path_rho_constant <= 1.0:
+            raise ValueError(f"--path-rho-constant must be in [0, 1], got {args.path_rho_constant}.")
+        if args.disable_path_residual_x0_time_rho:
+            raise ValueError(
+                "--path-rho-constant and --disable-path-residual-x0-time-rho are mutually exclusive."
+            )
+    if not 0.0 <= args.x0_hat_rho_scale <= 2.0:
+        raise ValueError(f"--x0-hat-rho-scale must be in [0, 2], got {args.x0_hat_rho_scale}.")
     if args.autosave_every < 0:
         raise ValueError("--autosave-every must be non-negative.")
     if args.per_gpu_batch_size is not None and args.per_gpu_batch_size < 1:

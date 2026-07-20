@@ -425,6 +425,7 @@ def create_learned_path_plan(
     subtractor_residual_scale=1.0,
     path_parameterization=None,
     disable_path_residual_x0_time_rho=False,
+    path_rho_constant=None,
     x0_hat_rho_scale=1.0,
 ):
     def plan_fn(*, t, x0, x1, model_kwargs):
@@ -436,6 +437,7 @@ def create_learned_path_plan(
                 x0,
                 t,
                 disable_path_residual_x0_time_rho=disable_path_residual_x0_time_rho,
+                path_rho_constant=path_rho_constant,
                 x0_hat_rho_scale=x0_hat_rho_scale,
             )
             xt, ut = generalized_mixed_path_derivative_fd(
@@ -648,6 +650,7 @@ def main(args):
             subtractor_residual_scale=args.learned_path_subtractor_residual_scale,
             path_parameterization=learned_path_metadata["path_parameterization"],
             disable_path_residual_x0_time_rho=args.disable_path_residual_x0_time_rho,
+            path_rho_constant=args.path_rho_constant,
             x0_hat_rho_scale=args.x0_hat_rho_scale,
         )
 
@@ -1161,7 +1164,10 @@ if __name__ == "__main__":
                         help="Mix weight on the learned path. 0 keeps the linear path, 1 uses the learned path.")
     parser.add_argument("--disable-path-residual-x0-time-rho", action="store_true",
                         help="Use rho=1 for residual x0_hat sampling instead of rho=clamp(1-t, 0, 1).")
-    parser.add_argument("--x0-hat-rho-scale", type=float, default=1.0)
+    parser.add_argument("--path-rho-constant", type=float, default=None,
+                        help="Use a constant rho in [0,1] instead of the time-dependent schedule.")
+    parser.add_argument("--x0-hat-rho-scale", type=float, default=1.0,
+                        help="Scale in rho(t)=clamp(scale*(1-t),0,1) when constant rho is unset.")
     parser.add_argument(
         "--learned-path-subtractor-residual-scale",
         type=float,
@@ -1245,6 +1251,15 @@ if __name__ == "__main__":
         raise ValueError("--learned-path-subtractor-residual-scale must be positive.")
     if not np.isfinite(args.ema_decay) or args.ema_decay < 0.0 or args.ema_decay > 1.0:
         raise ValueError("--ema-decay must be in [0, 1].")
+    if args.path_rho_constant is not None:
+        if not 0.0 <= args.path_rho_constant <= 1.0:
+            raise ValueError(f"--path-rho-constant must be in [0, 1], got {args.path_rho_constant}.")
+        if args.disable_path_residual_x0_time_rho:
+            raise ValueError(
+                "--path-rho-constant and --disable-path-residual-x0-time-rho are mutually exclusive."
+            )
+    if not 0.0 <= args.x0_hat_rho_scale <= 2.0:
+        raise ValueError(f"--x0-hat-rho-scale must be in [0, 2], got {args.x0_hat_rho_scale}.")
     if not 0.0 <= args.class_dropout_prob <= 1.0:
         raise ValueError("--class-dropout-prob must be in [0, 1].")
     if args.mg_start_step < -1:

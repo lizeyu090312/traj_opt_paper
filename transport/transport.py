@@ -362,8 +362,9 @@ class Sampler:
         """returns a sampling function with given ODE settings
         Args:
         - sampling_method: type of sampler used in solving the ODE; default to be Dopri5
-        - num_steps: 
-            - fixed solver (Euler, Heun): the actual number of integration steps performed
+        - num_steps:
+            - fixed solver (Euler, Heun): number of solver time points. This creates
+              num_steps - 1 integration intervals; Heun2 uses two NFE per interval.
             - adaptive solver (Dopri5): the number of datapoints saved during integration; produced by interpolation
         - atol: absolute error tolerance for the solver
         - rtol: relative error tolerance for the solver
@@ -404,8 +405,9 @@ class Sampler:
         """returns a sampling function for calculating likelihood with given ODE settings
         Args:
         - sampling_method: type of sampler used in solving the ODE; default to be Dopri5
-        - num_steps: 
-            - fixed solver (Euler, Heun): the actual number of integration steps performed
+        - num_steps:
+            - fixed solver (Euler, Heun): number of solver time points. This creates
+              num_steps - 1 integration intervals; Heun2 uses two NFE per interval.
             - adaptive solver (Dopri5): the number of datapoints saved during integration; produced by interpolation
         - atol: absolute error tolerance for the solver
         - rtol: relative error tolerance for the solver

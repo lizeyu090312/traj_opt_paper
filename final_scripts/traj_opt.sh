@@ -73,6 +73,7 @@ PATH_FD_STEP="${PATH_FD_STEP:-0.02}"
 PATH_ACCEL_REG_WEIGHT="${PATH_ACCEL_REG_WEIGHT:-0.0}"
 PATH_LOSS_MODE="${PATH_LOSS_MODE:-track_mixed_euclid_learned}"
 PATH_LEARNED_PATH_MIX="${PATH_LEARNED_PATH_MIX:-1.0}"
+PATH_RHO_CONSTANT="${PATH_RHO_CONSTANT:-}"
 X0_HAT_RHO_SCALE="${X0_HAT_RHO_SCALE:-1}"
 PATH_LR="${PATH_LR:-3e-4}"
 PATH_MIN_LR="${PATH_MIN_LR:-3e-5}"
@@ -97,6 +98,8 @@ FLOW_LEARNED_PATH_SUBTRACTOR_RESIDUAL_SCALE="${FLOW_LEARNED_PATH_SUBTRACTOR_RESI
 FLOW_LR="${FLOW_LR:-5e-6}"
 FLOW_WEIGHT_DECAY="${FLOW_WEIGHT_DECAY:-0.0}"
 FLOW_EMA_DECAY="${FLOW_EMA_DECAY:-0.9999}"
+FLOW_SAVED_EMA_LIST="${FLOW_SAVED_EMA_LIST:-}"
+FLOW_CHAIN_EMA_LABEL="${FLOW_CHAIN_EMA_LABEL:-ema}"
 FLOW_STAGE_STEPS="${FLOW_STAGE_STEPS:-2000}"
 FLOW_LOG_EVERY="${FLOW_LOG_EVERY:-50}"
 FLOW_CKPT_EVERY="${FLOW_CKPT_EVERY:-2000}"
@@ -119,6 +122,20 @@ MG_CONTRASTIVE="${MG_CONTRASTIVE:-0}"
 path_residual_x0_time_rho_args=()
 if [[ "${DISABLE_PATH_RESIDUAL_X0_TIME_RHO:-0}" == "1" ]]; then
   path_residual_x0_time_rho_args=(--disable-path-residual-x0-time-rho)
+fi
+
+path_rho_args=()
+if [[ -n "$PATH_RHO_CONSTANT" ]]; then
+  path_rho_args=(--path-rho-constant "$PATH_RHO_CONSTANT")
+else
+  path_rho_args=(--x0-hat-rho-scale "$X0_HAT_RHO_SCALE")
+fi
+
+flow_ema_args=()
+if [[ -n "$FLOW_SAVED_EMA_LIST" ]]; then
+  flow_ema_args=(--saved-ema-list "$FLOW_SAVED_EMA_LIST")
+else
+  flow_ema_args=(--ema-decay "$FLOW_EMA_DECAY")
 fi
 
 mg_path_args=()
@@ -230,6 +247,7 @@ echo "PATH_BETA=$PATH_BETA"
 echo "PATH_ACCEL_REG_WEIGHT=$PATH_ACCEL_REG_WEIGHT"
 echo "PATH_LOSS_MODE=$PATH_LOSS_MODE"
 echo "PATH_LEARNED_PATH_MIX=$PATH_LEARNED_PATH_MIX"
+echo "PATH_RHO_CONSTANT=${PATH_RHO_CONSTANT:-<unset>}"
 echo "X0_HAT_RHO_SCALE=$X0_HAT_RHO_SCALE"
 echo "PATH_LR=$PATH_LR"
 echo "PATH_MIN_LR=$PATH_MIN_LR"
@@ -247,6 +265,8 @@ echo "FLOW_CKPT_EVERY=$FLOW_CKPT_EVERY"
 echo "FLOW_AUTOSAVE_EVERY=$FLOW_AUTOSAVE_EVERY"
 echo "FLOW_LR=$FLOW_LR"
 echo "FLOW_EMA_DECAY=$FLOW_EMA_DECAY"
+echo "FLOW_SAVED_EMA_LIST=${FLOW_SAVED_EMA_LIST:-<unset>}"
+echo "FLOW_CHAIN_EMA_LABEL=$FLOW_CHAIN_EMA_LABEL"
 echo "FLOW_RESUME_CKPT=${FLOW_RESUME_CKPT:-<none>}"
 echo "MG_START_STEP=$MG_START_STEP"
 if (( MG_START_STEP >= 0 )); then
@@ -315,7 +335,7 @@ if [[ -n "$RESUME_FROM_CYCLE_DIR" ]]; then
     exit 1
   fi
   current_path_ckpt="$resume_path_experiment_dir/checkpoints/$(printf "%07d" "$PATH_STAGE_STEPS").pt"
-  current_flow_ckpt="$resume_flow_experiment_dir/checkpoints/$(printf "%07d" "$FLOW_STAGE_STEPS")_ema.pt"
+  current_flow_ckpt="$resume_flow_experiment_dir/checkpoints/$(printf "%07d" "$FLOW_STAGE_STEPS")_${FLOW_CHAIN_EMA_LABEL}.pt"
   start_cycle=$((10#${BASH_REMATCH[1]} + 1))
 fi
 
@@ -341,7 +361,7 @@ for cycle in $(seq "$start_cycle" "$NUM_CYCLES"); do
   fi
   flow_final_ckpt=""
   flow_final_ema_ckpt=""
-  flow_final_ema_tag="$(printf "%07d" "$FLOW_STAGE_STEPS")_ema"
+  flow_final_ema_tag="$(printf "%07d" "$FLOW_STAGE_STEPS")_${FLOW_CHAIN_EMA_LABEL}"
   if [[ -n "${flow_experiment_dir:-}" ]]; then
     flow_final_ckpt="$flow_experiment_dir/checkpoints/$(printf "%07d" "$FLOW_STAGE_STEPS").pt"
     flow_final_ema_ckpt="$flow_experiment_dir/checkpoints/${flow_final_ema_tag}.pt"
@@ -413,7 +433,7 @@ for cycle in $(seq "$start_cycle" "$NUM_CYCLES"); do
       --path-loss-mode "$PATH_LOSS_MODE" \
       --learned-path-mix "$PATH_LEARNED_PATH_MIX" \
       "${path_residual_x0_time_rho_args[@]}" \
-      --x0-hat-rho-scale "$X0_HAT_RHO_SCALE" \
+      "${path_rho_args[@]}" \
       "${mg_path_args[@]}" \
       --lr "$PATH_LR" \
       --lr-schedule cosine \
@@ -474,7 +494,6 @@ for cycle in $(seq "$start_cycle" "$NUM_CYCLES"); do
       --lr "$FLOW_LR" \
       --lr-schedule none \
       --weight-decay "$FLOW_WEIGHT_DECAY" \
-      --ema-decay "$FLOW_EMA_DECAY" \
       --path-type Linear \
       --prediction velocity \
       --loss-weight None \
@@ -484,11 +503,12 @@ for cycle in $(seq "$start_cycle" "$NUM_CYCLES"); do
       --sample-every 0 \
       --ckpt-every "$FLOW_CKPT_EVERY" \
       --autosave-every "$FLOW_AUTOSAVE_EVERY" \
+      "${flow_ema_args[@]}" \
       --learned-path-ckpt "$current_path_ckpt" \
       --learned-path-fd-step "$PATH_FD_STEP" \
       --learned-path-mix "$FLOW_LEARNED_PATH_MIX" \
       "${path_residual_x0_time_rho_args[@]}" \
-      --x0-hat-rho-scale "$X0_HAT_RHO_SCALE" \
+      "${path_rho_args[@]}" \
       --learned-path-subtractor-residual-scale "$FLOW_LEARNED_PATH_SUBTRACTOR_RESIDUAL_SCALE" \
       "${mg_flow_args[@]}"
     stop_last_gpu_log
