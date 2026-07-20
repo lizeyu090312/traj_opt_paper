@@ -3,23 +3,14 @@ set -euo pipefail
 
 PROJECT_ROOT="${PROJECT_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 LAUNCHER="$PROJECT_ROOT/final_scripts/traj_opt.sh"
-MG_CKPT="${MG_CKPT:-}"
-PATH_CKPT="${PATH_CKPT:-}"
+MG_CKPT="$PROJECT_ROOT/finetuned_ckpt/sit-xl-2-mg_initial.pt"
 
-if [[ -z "$MG_CKPT" ]]; then
-  echo "Set MG_CKPT to a native SiT-XL/2 Model Guidance checkpoint." >&2
-  exit 1
-fi
 if [[ ! -f "$MG_CKPT" ]]; then
   echo "MG checkpoint not found: $MG_CKPT" >&2
   exit 1
 fi
-if [[ -z "$PATH_CKPT" ]]; then
-  echo "Set PATH_CKPT to the historical 65k SiT-B/2-MG EMA checkpoint used to initialize the path model." >&2
-  exit 1
-fi
-if [[ ! -f "$PATH_CKPT" ]]; then
-  echo "Path checkpoint not found: $PATH_CKPT" >&2
+if [[ ! -f "$PROJECT_ROOT/finetuned_ckpt/sit-b-2-mg_initial.pt" ]]; then
+  echo "MG checkpoint not found: $PROJECT_ROOT/finetuned_ckpt/sit-b-2-mg_initial.pt" >&2
   exit 1
 fi
 
@@ -29,47 +20,29 @@ cd "$PROJECT_ROOT"
 NPROC_PER_NODE="${NPROC_PER_NODE:-2}" \
 OUT_ROOT="${OUT_ROOT:-$PROJECT_ROOT/output/final_repro/SiT-XL-2-MG}" \
 SIT_MODEL="SiT-XL/2-MG" \
-PATH_MODEL="SiT-B/2" \
+PATH_MODEL="${PATH_MODEL:-SiT-B/2}" \
 GEN_CONFIG_PATH="$PROJECT_ROOT/gen_configs/SiT-XL-2_mg.sh" \
-MODE="ODE" \
-SAMPLING_METHOD="heun2" \
-NUM_SAMPLING_NFE="250" \
 ATTN_FUNC="${ATTN_FUNC:-fa3}" \
 AMP_DTYPE="${AMP_DTYPE:-bf16}" \
 NUM_CYCLES="${NUM_CYCLES:-3}" \
-NUM_FID_SAMPLES="${NUM_FID_SAMPLES:-10000}" \
 INITIAL_FLOW_CKPT="$MG_CKPT" \
-INITIAL_PATH_CKPT="$PATH_CKPT" \
+INITIAL_PATH_CKPT="$PROJECT_ROOT/finetuned_ckpt/sit-b-2-mg_initial.pt" \
 PATH_TEACHER_CKPT="$MG_CKPT" \
 PATH_ARCH="${PATH_ARCH:-dual_stem_teacher_residual}" \
 PATH_USE_ENDPOINT_CONDITIONING="${PATH_USE_ENDPOINT_CONDITIONING:-1}" \
-PATH_LOSS_MODE="track_mixed_euclid_learned" \
 PATH_BETA="${PATH_BETA:-0.95}" \
 PATH_LEARNED_PATH_MIX="${PATH_LEARNED_PATH_MIX:-0.4}" \
 FLOW_LEARNED_PATH_MIX="${FLOW_LEARNED_PATH_MIX:-0.4}" \
 X0_HAT_RHO_SCALE="${X0_HAT_RHO_SCALE:-0.7}" \
 PATH_GLOBAL_BATCH_SIZE="${PATH_GLOBAL_BATCH_SIZE:-140}" \
 PATH_PER_GPU_BATCH_SIZE="${PATH_PER_GPU_BATCH_SIZE:-70}" \
-FLOW_GLOBAL_BATCH_SIZE="${FLOW_GLOBAL_BATCH_SIZE:-768}" \
 FLOW_PER_GPU_BATCH_SIZE="${FLOW_PER_GPU_BATCH_SIZE:-192}" \
+FLOW_EMA_DECAY="${FLOW_EMA_DECAY:-0.999}" \
 PATH_LR="${PATH_LR:-5e-5}" \
 PATH_MIN_LR="${PATH_MIN_LR:-5e-6}" \
 PATH_STAGE_STEPS="${PATH_STAGE_STEPS:-3000}" \
-PATH_LR_ANNEAL_STEPS="${PATH_LR_ANNEAL_STEPS:-3000}" \
 PATH_CKPT_EVERY="${PATH_CKPT_EVERY:-3000}" \
 PATH_EVAL_EVERY="${PATH_EVAL_EVERY:-3000}" \
-PATH_AUTOSAVE_EVERY="${PATH_AUTOSAVE_EVERY:-200}" \
 FLOW_STAGE_STEPS="${FLOW_STAGE_STEPS:-4000}" \
-FLOW_CKPT_EVERY="${FLOW_CKPT_EVERY:-2000}" \
-FLOW_AUTOSAVE_EVERY="${FLOW_AUTOSAVE_EVERY:-200}" \
-FLOW_SAVED_EMA_LIST="0.999" \
-FLOW_CHAIN_EMA_LABEL="ema0.999" \
 MG_START_STEP="${MG_START_STEP:-0}" \
-MG_DATA_RATIO_BASE="${MG_DATA_RATIO_BASE:-0.2}" \
-MG_DROP_FRAC="${MG_DROP_FRAC:-0.1}" \
-MG_W_LO="${MG_W_LO:-1.45}" \
-MG_W_HI="${MG_W_HI:-1.45}" \
-MG_DATA_SIDE_THRESHOLD="${MG_DATA_SIDE_THRESHOLD:-0.75}" \
-MG_CLASS_DROPOUT_PROB="${MG_CLASS_DROPOUT_PROB:-0.0}" \
-MG_LEARN_SIGMA="${MG_LEARN_SIGMA:-0}" \
 sbatch "$LAUNCHER"

@@ -31,21 +31,10 @@ IMAGE_SIZE="${IMAGE_SIZE:-256}"
 MODE="${MODE:-ODE}"
 CFG_SCALE="${CFG_SCALE:-2.0}"
 BATCH_SIZE="${BATCH_SIZE:-250}"
+NUM_SAMPLING_STEPS="${NUM_SAMPLING_STEPS:-126}"
 SAMPLING_METHOD="${SAMPLING_METHOD:-heun2}"
-NUM_SAMPLING_NFE="${NUM_SAMPLING_NFE:-250}"
 NUM_FID_SAMPLES="${NUM_FID_SAMPLES:-50000}"
 FID_ONLY="${FID_ONLY:-0}"  # Set to 1/true to compute FID from existing images.
-
-if [[ "$MODE" != "ODE" || "$SAMPLING_METHOD" != "heun2" ]]; then
-  echo "This FID driver defines compute by NFE and requires MODE=ODE with SAMPLING_METHOD=heun2." >&2
-  exit 1
-fi
-if [[ ! "$NUM_SAMPLING_NFE" =~ ^[1-9][0-9]*$ ]] || (( NUM_SAMPLING_NFE % 2 != 0 )); then
-  echo "Heun2 NUM_SAMPLING_NFE must be a positive even integer, got '$NUM_SAMPLING_NFE'." >&2
-  exit 1
-fi
-# Two model evaluations per interval; K grid points define K-1 intervals.
-NUM_SAMPLING_STEPS=$((NUM_SAMPLING_NFE / 2 + 1))
 
 CHECKPOINT_PATH="${CHECKPOINT_PATH:?CHECKPOINT_PATH must be set to a single .pt checkpoint}"
 FID_RUN_NAME="${FID_RUN_NAME:?FID_RUN_NAME must be set for this sbatch}"
@@ -88,13 +77,13 @@ RESULT_TSV="${RESULT_TSV:-$RUN_ROOT/fid_result.tsv}"
 RESULT_TSV="$(project_abspath "$RESULT_TSV")"
 
 build_sample_folder_name() {
-  printf '%s-%s-cfg-%s-%s-%s-nfe%s-%s\n' \
+  printf '%s-%s-cfg-%s-%s-%s-%s-%s\n' \
     "${MODEL_NAME_ABBREV//\//-}" \
     "$CHECKPOINT_TAG" \
     "$CFG_SCALE" \
     "$BATCH_SIZE" \
     "$MODE" \
-    "$NUM_SAMPLING_NFE" \
+    "$NUM_SAMPLING_STEPS" \
     "$SAMPLING_METHOD"
 }
 
@@ -111,8 +100,7 @@ image-size: $IMAGE_SIZE
 mode: $MODE
 cfg-scale: $CFG_SCALE
 batch-size: $BATCH_SIZE
-num-sampling-nfe: $NUM_SAMPLING_NFE
-solver-time-points: $NUM_SAMPLING_STEPS
+num-sampling-steps: $NUM_SAMPLING_STEPS
 sampling-method: $SAMPLING_METHOD
 num-fid-samples: $NUM_FID_SAMPLES
 fid-only: $FID_ONLY
@@ -172,9 +160,9 @@ write_fid() {
   fi
 
   if [[ ! -f "$RESULT_TSV" ]]; then
-    printf "run_name\tcheckpoint_path\tfid\tgenerated_image_path\tmodel\tcfg_scale\tbatch_size\tnum_sampling_nfe\tsolver_time_points\tsampling_method\tnum_fid_samples\n" > "$RESULT_TSV"
+    printf "run_name\tcheckpoint_path\tfid\tgenerated_image_path\tmodel\tcfg_scale\tbatch_size\tnum_sampling_steps\tsampling_method\tnum_fid_samples\n" > "$RESULT_TSV"
   fi
-  printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n" \
+  printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n" \
     "$FID_RUN_NAME" \
     "$CHECKPOINT_PATH" \
     "$fid" \
@@ -182,7 +170,6 @@ write_fid() {
     "$MODEL_NAME_ABBREV" \
     "$CFG_SCALE" \
     "$BATCH_SIZE" \
-    "$NUM_SAMPLING_NFE" \
     "$NUM_SAMPLING_STEPS" \
     "$SAMPLING_METHOD" \
     "$NUM_FID_SAMPLES" >> "$RESULT_TSV"

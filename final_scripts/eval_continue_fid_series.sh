@@ -37,26 +37,10 @@ PER_PROC_BATCH_SIZE="${PER_PROC_BATCH_SIZE:-32}"
 BASELINE_FID="${BASELINE_FID:-}"
 MODE="${MODE:-ODE}"
 SAMPLING_METHOD="${SAMPLING_METHOD:-}"
-NUM_SAMPLING_NFE="${NUM_SAMPLING_NFE:-}"
 
 if [[ "$MODE" != "ODE" && "$MODE" != "SDE" ]]; then
   echo "MODE must be ODE or SDE, got '$MODE'." >&2
   exit 1
-fi
-
-# torchdiffeq's fixed-grid Heun2 evaluates the model twice per interval. The
-# sampler argument is the number of grid points, so N NFE needs N/2 + 1 points.
-if [[ -n "$NUM_SAMPLING_NFE" ]]; then
-  if [[ "$MODE" != "ODE" || "$SAMPLING_METHOD" != "heun2" ]]; then
-    echo "NUM_SAMPLING_NFE is currently supported only for MODE=ODE and SAMPLING_METHOD=heun2." >&2
-    exit 1
-  fi
-  if [[ ! "$NUM_SAMPLING_NFE" =~ ^[1-9][0-9]*$ ]] || (( NUM_SAMPLING_NFE % 2 != 0 )); then
-    echo "Heun2 NUM_SAMPLING_NFE must be a positive even integer, got '$NUM_SAMPLING_NFE'." >&2
-    exit 1
-  fi
-  NUM_SAMPLING_STEPS=$((NUM_SAMPLING_NFE / 2 + 1))
-  echo "Heun2 evaluation: ${NUM_SAMPLING_NFE} NFE = ${NUM_SAMPLING_STEPS} solver time points."
 fi
 
 mkdir -p "$OUT_ROOT"
@@ -67,7 +51,7 @@ export MPLCONFIGDIR="${MPLCONFIGDIR:-$OUT_ROOT/.mplconfig}"
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-4}"
 mkdir -p "$MPLCONFIGDIR"
 
-mapfile -t EMA_CKPTS < <(find "$RESULTS_DIR" -path '*/checkpoints/*_ema*.pt' -type f | sort)
+mapfile -t EMA_CKPTS < <(find "$RESULTS_DIR" -path '*/checkpoints/*_ema.pt' -type f | sort)
 if [[ "${#EMA_CKPTS[@]}" -eq 0 ]]; then
   echo "No EMA checkpoints found under $RESULTS_DIR" >&2
   exit 1

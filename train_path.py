@@ -1621,10 +1621,8 @@ if __name__ == "__main__":
     parser.add_argument("--learned-path-mix", type=float, default=1.0)
     parser.add_argument("--disable-path-residual-x0-time-rho", action="store_true",
                         help="Use rho=1 for residual x0_hat sampling instead of rho=clamp(1-t, 0, 1).")
-    parser.add_argument("--path-rho-constant", type=float, default=None,
-                        help="Use a constant rho in [0,1] instead of the time-dependent schedule.")
-    parser.add_argument("--x0-hat-rho-scale", type=float, default=1.0,
-                        help="Scale in rho(t)=clamp(scale*(1-t),0,1) when constant rho is unset.")
+    parser.add_argument("--path-rho-constant", type=float, default=None)
+    parser.add_argument("--x0-hat-rho-scale", type=float, default=1.0)
     parser.add_argument(
         "--mg-start-step",
         type=int,
@@ -1697,15 +1695,10 @@ if __name__ == "__main__":
         raise ValueError("--fd-step must lie in (0, 1/3) when --accel-reg-weight is enabled.")
     if args.learned_path_mix < 0.0 or args.learned_path_mix > 1.0:
         raise ValueError("--learned-path-mix must be in [0, 1].")
-    if args.path_rho_constant is not None:
-        if not 0.0 <= args.path_rho_constant <= 1.0:
-            raise ValueError(f"--path-rho-constant must be in [0, 1], got {args.path_rho_constant}.")
-        if args.disable_path_residual_x0_time_rho:
-            raise ValueError(
-                "--path-rho-constant and --disable-path-residual-x0-time-rho are mutually exclusive."
-            )
-    if not 0.0 <= args.x0_hat_rho_scale <= 2.0:
-        raise ValueError(f"--x0-hat-rho-scale must be in [0, 2], got {args.x0_hat_rho_scale}.")
+    if args.path_rho_constant is not None and not 0.0 <= args.path_rho_constant <= 1.0:
+        raise ValueError("--path-rho-constant must be in [0, 1].")
+    if args.path_rho_constant is not None and args.disable_path_residual_x0_time_rho:
+        raise ValueError("--path-rho-constant and --disable-path-residual-x0-time-rho are mutually exclusive.")
     if args.autosave_every < 0:
         raise ValueError("--autosave-every must be non-negative.")
     if args.per_gpu_batch_size is not None and args.per_gpu_batch_size < 1:
