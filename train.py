@@ -24,6 +24,7 @@ from time import time
 import argparse
 import logging
 import os
+import random
 
 from models import (
     SiT_models,
@@ -53,6 +54,7 @@ from sit_utils import wandb_utils
 
 
 AUTORESUME_FILENAME = "latest_autoresume.pt"
+RNG_STATE_KEY = "rng_state"
 TEST_AUTOSAVE_EXIT_CODE = 85
 IMAGENET_TRAIN_IMAGE_COUNT = 1_281_167
 DUAL_STEM_PATH_PARAMETERIZATIONS = {"dual_stem_teacher_residual", "dual_stem_teacher_residual_subboundary", "dual_stem_direct_residual"}
@@ -141,6 +143,84 @@ def load_torch_checkpoint(path):
 
 def autoresume_checkpoint_path(checkpoint_dir):
     return os.path.join(checkpoint_dir, AUTORESUME_FILENAME)
+
+
+def capture_local_rng_state(device):
+    return {
+        "python": random.getstate(),
+        "numpy": np.random.get_state(),
+        "torch_cpu": torch.get_rng_state(),
+        "torch_cuda": torch.cuda.get_rng_state(device) if torch.cuda.is_available() else None,
+    }
+
+
+def gather_rng_state_by_rank(device):
+    local_state = capture_local_rng_state(device)
+    if dist.is_available() and dist.is_initialized():
+        world_size = dist.get_world_size()
+        states = [None] * world_size
+        dist.all_gather_object(states, local_state)
+    else:
+        world_size = 1
+        states = [local_state]
+    return {
+        "world_size": world_size,
+        "states": states,
+    }
+
+
+def resolve_resume_rng_state(checkpoint, *, rank, world_size, logger):
+    metadata = checkpoint.get(RNG_STATE_KEY)
+    if metadata is None:
+        if rank == 0:
+            logger.warning(
+                "Resume checkpoint has no per-rank RNG state; continuing with the launch-time "
+                "RNG state, so this resume will not be RNG-exact."
+            )
+        return None, False
+    if not isinstance(metadata, dict) or not isinstance(metadata.get("world_size"), int):
+        raise ValueError("Resume checkpoint contains malformed per-rank RNG metadata.")
+
+    saved_world_size = metadata["world_size"]
+    if saved_world_size != world_size:
+        if rank == 0:
+            logger.warning(
+                f"Resume checkpoint saved RNG state for world_size={saved_world_size}, but the "
+                f"current world_size is {world_size}; ignoring the saved RNG state and reseeding "
+                "each current rank. This resume will not be RNG-exact."
+            )
+        return None, True
+
+    states = metadata.get("states")
+    if not isinstance(states, (list, tuple)) or len(states) != saved_world_size:
+        raise ValueError(
+            "Resume checkpoint per-rank RNG metadata has an invalid state list for its saved world size."
+        )
+    required_keys = {"python", "numpy", "torch_cpu", "torch_cuda"}
+    for saved_rank, state in enumerate(states):
+        if not isinstance(state, dict) or not required_keys.issubset(state):
+            raise ValueError(f"Resume checkpoint contains malformed RNG state for rank {saved_rank}.")
+        if not torch.is_tensor(state["torch_cpu"]):
+            raise ValueError(f"Resume checkpoint contains malformed Torch CPU RNG state for rank {saved_rank}.")
+        if state["torch_cuda"] is not None and not torch.is_tensor(state["torch_cuda"]):
+            raise ValueError(f"Resume checkpoint contains malformed Torch CUDA RNG state for rank {saved_rank}.")
+    return states[rank], False
+
+
+def restore_local_rng_state(state, device):
+    random.setstate(state["python"])
+    np.random.set_state(state["numpy"])
+    torch.set_rng_state(state["torch_cpu"])
+    if torch.cuda.is_available():
+        if state["torch_cuda"] is None:
+            raise ValueError("Resume checkpoint is missing CUDA RNG state for a CUDA training process.")
+        torch.cuda.set_rng_state(state["torch_cuda"], device=device)
+
+
+def reseed_local_rng_state(seed):
+    random.seed(seed)
+    np.random.seed(seed % (2 ** 32))
+    torch.manual_seed(seed)
 
 
 def normalize_ema_decay_label(decay):
@@ -587,6 +667,8 @@ def main(args):
     resumed_from_checkpoint = False
     resume_path = None
     resume_source = None
+    resume_rng_state = None
+    reseed_rng_on_resume = False
 
     if args.auto_resume:
         candidate_autoresume_path = autoresume_checkpoint_path(checkpoint_dir)
@@ -617,9 +699,13 @@ def main(args):
         start_epoch = resume_obj.get("epoch", 0)
         start_steps_in_epoch = resume_obj.get("steps_in_epoch", 0)
         train_steps = resume_obj.get("train_steps", 0)
+        resume_rng_state, reseed_rng_on_resume = resolve_resume_rng_state(
+            resume_obj,
+            rank=rank,
+            world_size=world_size,
+            logger=logger,
+        )
         resumed_from_checkpoint = True
-    set_optimizer_lr(opt, args.lr)
-
     learned_path_model = None
     learned_path_energy_teacher = None
     learned_path_subtractor = None
@@ -737,6 +823,10 @@ def main(args):
         raise ValueError(
             "Not enough batches per epoch for the requested global/per-GPU batch configuration."
         )
+    # DataLoader iterator construction consumes Torch CPU RNG. At an epoch
+    # boundary the uninterrupted run has not made that iterator yet, while a
+    # mid-epoch resume must rebuild and fast-forward it before restoring RNG.
+    resume_at_epoch_boundary = resumed_from_checkpoint and start_steps_in_epoch >= steps_per_epoch
     while start_steps_in_epoch >= steps_per_epoch:
         start_steps_in_epoch -= steps_per_epoch
         start_epoch += 1
@@ -744,14 +834,14 @@ def main(args):
     lr_anneal_steps = args.lr_anneal_steps
     if args.lr_schedule != "none":
         if lr_anneal_steps is None:
-            lr_anneal_steps = max(total_train_steps - train_steps, 1)
+            lr_anneal_steps = max(total_train_steps, 1)
         lr_schedule = make_lr_schedule(
             schedule=args.lr_schedule,
             base_lr=args.lr,
             min_lr=args.min_lr,
             warmup_steps=args.lr_warmup_steps,
             anneal_steps=lr_anneal_steps,
-            start_step=train_steps,
+            start_step=0,
         )
         set_optimizer_lr(opt, lr_schedule(train_steps))
     else:
@@ -849,6 +939,16 @@ def main(args):
             if epoch_steps_completed == 0
             else f"Beginning epoch {epoch} at resumed optimizer-step offset {epoch_steps_completed}..."
         )
+        is_first_resumed_epoch = resumed_from_checkpoint and epoch == start_epoch
+        if is_first_resumed_epoch and resume_at_epoch_boundary:
+            if resume_rng_state is not None:
+                restore_local_rng_state(resume_rng_state, device)
+                logger.info("Restored this rank's saved RNG state at an epoch boundary.")
+            elif reseed_rng_on_resume:
+                reseed_local_rng_state(seed)
+                logger.info("Reseeded this rank's RNG state at an epoch boundary.")
+            resume_rng_state = None
+            reseed_rng_on_resume = False
         loader_iter = iter(loader)
         fast_forward_loader(
             loader_iter,
@@ -857,6 +957,15 @@ def main(args):
             epoch=epoch,
             train_steps=train_steps,
         )
+        if is_first_resumed_epoch and not resume_at_epoch_boundary:
+            if resume_rng_state is not None:
+                restore_local_rng_state(resume_rng_state, device)
+                logger.info("Restored this rank's saved RNG state after data-loader fast-forwarding.")
+            elif reseed_rng_on_resume:
+                reseed_local_rng_state(seed)
+                logger.info("Reseeded this rank's RNG state after data-loader fast-forwarding.")
+            resume_rng_state = None
+            reseed_rng_on_resume = False
         resume_steps_in_epoch = 0
         while epoch_steps_completed < steps_per_epoch:
             if lr_schedule is not None:
@@ -1012,6 +1121,16 @@ def main(args):
                 and train_steps > 0
                 and train_steps % args.autosave_every == 0
             )
+            should_checkpoint = (
+                args.ckpt_every > 0
+                and train_steps > 0
+                and train_steps % args.ckpt_every == 0
+            )
+            checkpoint_rng_state = (
+                gather_rng_state_by_rank(device)
+                if should_autosave or is_final_step or should_checkpoint
+                else None
+            )
             if should_autosave or is_final_step:
                 if rank == 0:
                     autoresume_checkpoint = {
@@ -1027,6 +1146,7 @@ def main(args):
                         "epoch": epoch,
                         "steps_in_epoch": epoch_steps_completed,
                         "train_steps": train_steps,
+                        RNG_STATE_KEY: checkpoint_rng_state,
                     })
                     if scaler.is_enabled():
                         autoresume_checkpoint["scaler"] = scaler.state_dict()
@@ -1037,7 +1157,7 @@ def main(args):
                 maybe_exit_after_autosave(train_steps, total_train_steps, logger)
 
             # Save SiT checkpoint:
-            if args.ckpt_every > 0 and train_steps % args.ckpt_every == 0 and train_steps > 0:
+            if should_checkpoint:
                 if rank == 0:
                     checkpoint = {
                         "model": model.module.state_dict(),
@@ -1053,6 +1173,7 @@ def main(args):
                         "epoch": epoch,
                         "steps_in_epoch": epoch_steps_completed,
                         "train_steps": train_steps,
+                        RNG_STATE_KEY: checkpoint_rng_state,
                     })
                     if scaler.is_enabled():
                         checkpoint["scaler"] = scaler.state_dict()
@@ -1150,7 +1271,7 @@ if __name__ == "__main__":
     parser.add_argument("--min-lr", type=float, default=0.0)
     parser.add_argument("--lr-warmup-steps", type=int, default=0)
     parser.add_argument("--lr-anneal-steps", type=int, default=None,
-                        help="Number of steps over which to anneal the LR starting from the current train step.")
+                        help="Number of global training steps over which to anneal the LR.")
     parser.add_argument("--weight-decay", type=float, default=0.0)
     parser.add_argument("--ema-decay", type=float, default=0.9999)
     parser.add_argument("--saved-ema-list", type=parse_saved_ema_list, default=None,

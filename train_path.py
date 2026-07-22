@@ -52,7 +52,14 @@ from path_energy import (
     zero_sit_output_layer,
 )
 from sit_utils import wandb_utils
-from train import update_ema
+from train import (
+    RNG_STATE_KEY,
+    gather_rng_state_by_rank,
+    reseed_local_rng_state,
+    resolve_resume_rng_state,
+    restore_local_rng_state,
+    update_ema,
+)
 
 
 EVAL_TIMES = (0.1, 0.3, 0.5, 0.7, 0.9)
@@ -724,7 +731,7 @@ def evaluate(path_model, teacher, path_subtractor, vae, feature_decoder, feature
     return reduced, reduced_diagnostics
 
 
-def save_checkpoint(checkpoint_dir, train_steps, epoch, steps_in_epoch, path_model, path_ema, opt, scaler, args):
+def save_checkpoint(checkpoint_dir, train_steps, epoch, steps_in_epoch, path_model, path_ema, opt, scaler, args, rng_state):
     checkpoint = {
         "model": unwrap_model(path_model).state_dict(),
         "ema": path_ema.state_dict(),
@@ -733,6 +740,7 @@ def save_checkpoint(checkpoint_dir, train_steps, epoch, steps_in_epoch, path_mod
         "epoch": epoch,
         "steps_in_epoch": steps_in_epoch,
         "train_steps": train_steps,
+        RNG_STATE_KEY: rng_state,
     }
     if scaler.is_enabled():
         checkpoint["scaler"] = scaler.state_dict()
@@ -940,6 +948,8 @@ def main(args):
     init_mode = None
     resume_path = None
     resume_source = None
+    resume_rng_state = None
+    reseed_rng_on_resume = False
     if args.auto_resume:
         candidate_autoresume_path = autoresume_checkpoint_path(checkpoint_dir)
         if os.path.isfile(candidate_autoresume_path):
@@ -964,12 +974,16 @@ def main(args):
         start_epoch = resume_obj.get("epoch", 0)
         start_steps_in_epoch = resume_obj.get("steps_in_epoch", 0)
         train_steps = resume_obj.get("train_steps", 0)
+        resume_rng_state, reseed_rng_on_resume = resolve_resume_rng_state(
+            resume_obj,
+            rank=rank,
+            world_size=world_size,
+            logger=logger,
+        )
         init_mode = "resume"
     else:
         init_mode = initialize_path_model_from_state(path_model, path_init_state, args)
         update_ema(path_ema, path_model, decay=0)
-    set_optimizer_lr(opt, args.lr)
-
     disable_label_dropout(path_model)
     path_ema.eval()
     if is_distributed():
@@ -1155,6 +1169,10 @@ def main(args):
         raise ValueError(
             "Not enough batches per epoch for the requested global/per-GPU batch configuration."
         )
+    # DataLoader iterator construction consumes Torch CPU RNG. At an epoch
+    # boundary the uninterrupted run has not made that iterator yet, while a
+    # mid-epoch resume must rebuild and fast-forward it before restoring RNG.
+    resume_at_epoch_boundary = init_mode == "resume" and start_steps_in_epoch >= steps_per_epoch
     while start_steps_in_epoch >= steps_per_epoch:
         start_steps_in_epoch -= steps_per_epoch
         start_epoch += 1
@@ -1162,14 +1180,14 @@ def main(args):
     lr_anneal_steps = args.lr_anneal_steps
     if args.lr_schedule != "none":
         if lr_anneal_steps is None:
-            lr_anneal_steps = max(total_train_steps - train_steps, 1)
+            lr_anneal_steps = max(total_train_steps, 1)
         lr_schedule = make_lr_schedule(
             schedule=args.lr_schedule,
             base_lr=args.lr,
             min_lr=args.min_lr,
             warmup_steps=args.lr_warmup_steps,
             anneal_steps=lr_anneal_steps,
-            start_step=train_steps,
+            start_step=0,
         )
         set_optimizer_lr(opt, lr_schedule(train_steps))
     else:
@@ -1237,6 +1255,16 @@ def main(args):
         step_metric_sums = init_metric_sums()
         step_count = 0
         start_batch_idx = epoch_steps_completed * grad_accum_steps
+        is_first_resumed_epoch = init_mode == "resume" and epoch == start_epoch
+        if is_first_resumed_epoch and resume_at_epoch_boundary:
+            if resume_rng_state is not None:
+                restore_local_rng_state(resume_rng_state, device)
+                logger.info("Restored this rank's saved RNG state at an epoch boundary.")
+            elif reseed_rng_on_resume:
+                reseed_local_rng_state(seed)
+                logger.info("Reseeded this rank's RNG state at an epoch boundary.")
+            resume_rng_state = None
+            reseed_rng_on_resume = False
         train_loader_iter = iter(train_loader)
         fast_forward_loader(
             train_loader_iter,
@@ -1245,6 +1273,15 @@ def main(args):
             epoch=epoch,
             train_steps=train_steps,
         )
+        if is_first_resumed_epoch and not resume_at_epoch_boundary:
+            if resume_rng_state is not None:
+                restore_local_rng_state(resume_rng_state, device)
+                logger.info("Restored this rank's saved RNG state after data-loader fast-forwarding.")
+            elif reseed_rng_on_resume:
+                reseed_local_rng_state(seed)
+                logger.info("Reseeded this rank's RNG state after data-loader fast-forwarding.")
+            resume_rng_state = None
+            reseed_rng_on_resume = False
         resume_steps_in_epoch = 0
         for batch_idx, (x, y) in enumerate(train_loader_iter, start=start_batch_idx):
             if epoch_steps_completed >= steps_per_epoch:
@@ -1435,24 +1472,6 @@ def main(args):
                 and train_steps > 0
                 and train_steps % args.autosave_every == 0
             )
-            if should_autosave or is_final_step:
-                if rank == 0:
-                    autoresume_checkpoint = {
-                        "model": unwrap_model(path_model).state_dict(),
-                        "ema": path_ema.state_dict(),
-                        "opt": opt.state_dict(),
-                        "epoch": epoch,
-                        "steps_in_epoch": epoch_steps_completed,
-                        "train_steps": train_steps,
-                    }
-                    if scaler.is_enabled():
-                        autoresume_checkpoint["scaler"] = scaler.state_dict()
-                    autoresume_path = autoresume_checkpoint_path(checkpoint_dir)
-                    atomic_torch_save(autoresume_checkpoint, autoresume_path)
-                    logger.info(f"Saved autoresume checkpoint to {autoresume_path}")
-                if is_distributed():
-                    dist.barrier()
-                maybe_exit_after_autosave(train_steps, total_train_steps, logger)
 
             if args.eval_every > 0 and train_steps % args.eval_every == 0:
                 eval_metrics, eval_diagnostics = evaluate(
@@ -1510,7 +1529,34 @@ def main(args):
                             wandb_payload[f"eval_geometry_batch0/{key}"] = value
                         wandb_utils.log(wandb_payload, step=train_steps)
 
-            if args.ckpt_every > 0 and train_steps % args.ckpt_every == 0:
+            should_checkpoint = args.ckpt_every > 0 and train_steps % args.ckpt_every == 0
+            checkpoint_rng_state = (
+                gather_rng_state_by_rank(device)
+                if should_autosave or is_final_step or should_checkpoint
+                else None
+            )
+
+            if should_autosave or is_final_step:
+                if rank == 0:
+                    autoresume_checkpoint = {
+                        "model": unwrap_model(path_model).state_dict(),
+                        "ema": path_ema.state_dict(),
+                        "opt": opt.state_dict(),
+                        "epoch": epoch,
+                        "steps_in_epoch": epoch_steps_completed,
+                        "train_steps": train_steps,
+                        RNG_STATE_KEY: checkpoint_rng_state,
+                    }
+                    if scaler.is_enabled():
+                        autoresume_checkpoint["scaler"] = scaler.state_dict()
+                    autoresume_path = autoresume_checkpoint_path(checkpoint_dir)
+                    atomic_torch_save(autoresume_checkpoint, autoresume_path)
+                    logger.info(f"Saved autoresume checkpoint to {autoresume_path}")
+                if is_distributed():
+                    dist.barrier()
+                maybe_exit_after_autosave(train_steps, total_train_steps, logger)
+
+            if should_checkpoint:
                 if rank == 0:
                     checkpoint_path = save_checkpoint(
                         checkpoint_dir,
@@ -1522,6 +1568,7 @@ def main(args):
                         opt,
                         scaler,
                         args,
+                        checkpoint_rng_state,
                     )
                     logger.info(f"Saved checkpoint to {checkpoint_path}")
                 if is_distributed():
@@ -1603,7 +1650,7 @@ if __name__ == "__main__":
     parser.add_argument("--min-lr", type=float, default=0.0)
     parser.add_argument("--lr-warmup-steps", type=int, default=0)
     parser.add_argument("--lr-anneal-steps", type=int, default=None,
-                        help="Number of steps over which to anneal the LR starting from the current train step.")
+                        help="Number of global training steps over which to anneal the LR.")
     parser.add_argument("--weight-decay", type=float, default=0.0)
     parser.add_argument("--path_net_ema", "--path-net-ema", dest="path_net_ema", type=float, default=0.0)
     parser.add_argument("--beta", type=float, default=0.1)
