@@ -38,3 +38,11 @@ submit_fid "sit-l-traj-cycle-03-0004000-ema" "SiT-L/2" "2.0" \
 
 submit_fid "sit-s-traj-cycle-03-0004000-ema" "SiT-S/2" "3.5" \
   "/path/to/sit-s-traj-cycle-03-0004000-ema.pt"
+
+
+
+submit_fid "sit-xl-mg-traj-cycle-03-0004000-ema" "SiT-XL/2-MG" "1.0" \
+  "/path/to/sit-xl-mg-traj-cycle-03-0004000-ema.pt"
+
+submit_fid "sit-b-mg-traj-cycle-03-0004000-ema" "SiT-B/2" "1.0" \
+  "/path/to/sit-b-mg-traj-cycle-03-0004000-ema.pt"
