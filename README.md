@@ -1,6 +1,6 @@
-# Co-Evolving Interpolants and Flows via Path-Flow Alignment
+# Co-Evolving Paths and Flows via Path-Flow Alignment
 
-*Under review*
+This repository is the official implementation for [Co-Evolving Paths and Flows via Path-Flow Alignment](https://arxiv.org/abs/2610.08717), published at NeurIPS 2026. 
 
 ### Environment setup
 Install the environment from `environment.yml`; additionally, install Flash Attention 3 wheels from this [link](https://windreamer.github.io/flash-attention3-wheels/). 
@@ -39,3 +39,19 @@ Before running `bash scripts/fid_driver.sh` to compute the FID values, change th
 
 ### Acknowledgements
 This code is mainly built upon [SiT](https://github.com/willisma/SiT) and [MG](https://github.com/tzco/Diffusion-wo-CFG) repositories. 
+
+### Citation
+
+If you find this work helpful for your research, please consider citing our paper!
+
+```bib
+@misc{li2026trajopt,
+      title={Co-Evolving Paths and Flows via Path-Flow Alignment}, 
+      author={Zeyu Michael Li and William Xingxu Chen and Xiang Cheng},
+      year={2026},
+      eprint={2610.08717},
+      archivePrefix={arXiv},
+      primaryClass={cs.CV},
+      url={https://arxiv.org/abs/2610.08717}, 
+}
+```
